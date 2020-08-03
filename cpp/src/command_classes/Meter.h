@@ -36,6 +36,8 @@ namespace OpenZWave
 	{
 		namespace CC
 		{
+			struct s_MeterTypes; //Forward Declaration
+
 			/** \brief Implements COMMAND_CLASS_METER (0x32), a Z-Wave device command class.
 			 * \ingroup CommandClass
 			 */
@@ -79,9 +81,21 @@ namespace OpenZWave
 
 				private:
 					Meter(uint32 const _homeId, uint8 const _nodeId);
-					int32_t GetScale(uint8_t const *_data, uint32_t const_length);
+
 					bool HandleSupportedReport(uint8 const* _data, uint32 const _length, uint32 const _instance = 1);
 					bool HandleReport(uint8 const* _data, uint32 const _length, uint32 const _instance = 1);
+
+					bool GetMeterType(uint8_t const* _data, uint8_t& _meterType);
+					bool GetRateType(uint8_t const* _data, uint8_t& _rateType);
+					bool GetValueElementSize(uint8_t const* _data, uint8_t& _elementSize);
+					bool GetScale(uint8_t const* _data, const uint32_t _length, uint8_t& _scale, uint8_t& _scale1, uint8_t& _scale2);
+					bool GetPrecision(uint8_t const* _data, uint8_t& _precision);
+					bool ValidateLengthOfMessage(uint8_t const* _data, const uint8_t& _elementSize, const uint8_t& _scale, const uint16_t _deltaTime, const uint32 _length);
+					bool GetReportValue(uint8_t const* _data, const uint8_t& _elementSize, const uint8_t& _precision, double& _value, std::string& _valueStr);
+					bool GetDeltaTime(uint8_t const* _data, const uint8_t& _elementSize, uint16_t& _deltaTime);
+					bool GetMeterTypeDescription(uint8_t meterType, uint8_t scale, uint16_t& index, s_MeterTypes& meter);
+
+					bool ValidateValue(const uint16_t& meterIndex, const double& value, const double& valuePrev, const uint16_t& deltaTime);
 			};
 		} // namespace CC
 	} // namespace Internal

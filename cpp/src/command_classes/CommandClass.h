@@ -60,6 +60,18 @@ namespace OpenZWave
 			class OPENZWAVE_EXPORT CommandClass
 			{
 					friend Internal::VC::ValueStore;
+
+				public:
+					static uint8 const c_sizeMask = 0x07;
+					static uint8 const c_scaleMask = 0x18;
+					static uint8 const c_scaleShift = 0x03;
+					static uint8 const c_precisionMask = 0xe0;
+					static uint8 const c_precisionShift = 0x05;
+
+					static uint8 const c_meterTypeMask = 0x1F;
+					static uint8 const c_rateTypeMask = 0x60;
+					static uint8 const c_rateTypeShift = 0x05;
+
 				public:
 					enum
 					{

@@ -60,7 +60,7 @@ namespace OpenZWave
 
 			enum MeterType
 			{
-				MeterType_Electric = 0,
+				MeterType_Electric = 1,
 				MeterType_Gas,
 				MeterType_Water,
 				MeterType_Heating,
@@ -349,41 +349,86 @@ namespace OpenZWave
 				return false;
 			}
 
+
 //-----------------------------------------------------------------------------
 // <Meter::HandleReport>
 // Read the reported meter value
 //-----------------------------------------------------------------------------
 			bool Meter::HandleReport(uint8 const* _data, uint32 const _length, uint32 const _instance)
 			{
-
-				// Get the value and scale
-				uint8 scale;
-				uint8 precision = 0;
-				string valueStr = ExtractValue(&_data[2], &scale, &precision);
-				scale = GetScale(_data, _length);
-				int8 meterType = (MeterType) (_data[1] & 0x1f);
-
-				uint16_t index = (((meterType -1) * 16) + scale);
-
-				if (MeterTypes.count(index) == 0) {
-					Log::Write(LogLevel_Warning, GetNodeId(), "MeterTypes Index is out of range/not valid - %d", index);
+				if (GetVersion() < 1 || GetVersion() > GetMaxVersion())
+				{
+					Log::Write(LogLevel_Warning, GetNodeId(), "Not a valid version (%d)", GetVersion());
 					return false;
 				}
 
-				Log::Write(LogLevel_Info, GetNodeId(), "Received Meter Report for %s (%d) with Units %s (%d) on Index %d: %s",MeterTypes.at(index).Label.c_str(), meterType, MeterTypes.at(index).Unit.c_str(), scale, index, valueStr.c_str());
+				uint8_t meterType;
+				if (GetMeterType(_data, meterType) == false)
+					return false;
+
+				uint8_t rateType;
+				if (GetRateType(_data, rateType) == false)
+					return false;
+
+				uint8_t elementSize;
+				if (GetValueElementSize(_data, elementSize) == false)
+					return false;
+
+				uint8_t scale, scale1, scale2;
+				if (GetScale(_data, _length, scale, scale1, scale2) == false)
+					return false;
+
+				uint8_t precision;
+				if (GetPrecision(_data, precision) == false)
+					return false;
+
+				uint16_t deltaTime;
+				if (GetDeltaTime(_data, elementSize, deltaTime) == false)
+					return false;
+
+				if (ValidateLengthOfMessage(_data, elementSize, scale1, deltaTime, _length) == false)
+					return false;
+
+				double valueDbl;
+				std::string valueStr;
+				if (GetReportValue(&_data[3], elementSize, precision, valueDbl, valueStr) == false)
+					return false;
+
+				double valuePrevDbl = valueDbl;
+				std::string valuePrevStr = valueStr;
+				if (deltaTime > 0)
+				{
+					if (GetReportValue(&_data[3 + 2 + elementSize], elementSize, precision, valuePrevDbl, valuePrevStr) == false)
+						return false;
+				}
+
+				uint16_t index;
+				s_MeterTypes meter;
+				if (GetMeterTypeDescription(meterType, scale, index, meter) == false)
+					return false;
+
+				if (ValidateValue(index, valueDbl, valuePrevDbl, deltaTime) == false)
+					return false;
+
+				Log::Write(LogLevel_Info, GetNodeId(), "Received Meter Report for %s (%d) with Units %s (%d) on Index %d: %s", meter.Label.c_str(), meterType, meter.Unit.c_str(), scale, index, valueStr.c_str());
 
 				Internal::VC::ValueDecimal* value = static_cast<Internal::VC::ValueDecimal*>(GetValue(_instance, index));
-				if (!value && (GetVersion() == 1))
+				if (nullptr == value)
 				{
-					if (Node* node = GetNodeUnsafe())
+					if (GetVersion() == 1)
 					{
-						Log::Write(LogLevel_Info, GetNodeId(), "Creating Version 1 MeterType %s (%d) with Unit %s (%d) at Index %d", MeterTypes.at(index).Label.c_str(), meterType, MeterTypes.at(index).Unit.c_str(), scale, index);
-						node->CreateValueDecimal(ValueID::ValueGenre_User, GetCommandClassId(), _instance, index, MeterTypes.at(index).Label, MeterTypes.at(index).Unit, true, false, "0.0", 0);
-						value = static_cast<Internal::VC::ValueDecimal*>(GetValue(_instance, index));
+						 if (Node* node = GetNodeUnsafe())
+						{
+							Log::Write(LogLevel_Info, GetNodeId(), "Creating Version 1 MeterType %s (%d) with Unit %s (%d) at Index %d", meter.Label.c_str(), meterType, meter.Unit.c_str(), scale, index);
+							node->CreateValueDecimal(ValueID::ValueGenre_User, GetCommandClassId(), _instance, index, meter.Label, meter.Unit, true, false, "0.0", 0);
+							value = static_cast<Internal::VC::ValueDecimal*>(GetValue(_instance, index));
+						}
 					}
-				} else if (!value) {
-					Log::Write(LogLevel_Warning, GetNodeId(), "Can't Find a ValueID Index for %s (%d) with Unit %s (%d) - Index %d", MeterTypes.at(index).Label.c_str(), meterType, MeterTypes.at(index).Unit.c_str(), scale, index);
-					return false;
+					else
+					{
+						Log::Write(LogLevel_Warning, GetNodeId(), "Can't Find a ValueID Index for %s (%d) with Unit %s (%d) - Index %d", meter.Label.c_str(), meterType, meter.Unit.c_str(), scale, index);
+						return false;
+					}
 				}
 				value->OnValueRefreshed(valueStr);
 				if (value->GetPrecision() != precision)
@@ -391,12 +436,13 @@ namespace OpenZWave
 					value->SetPrecision(precision);
 				}
 				value->Release();
-				bool exporting = false;
+
 				if (GetVersion() > 1)
 				{
-					exporting = ((_data[1] & 0x60) == 0x40);
-					if (Internal::VC::ValueBool* value = static_cast<Internal::VC::ValueBool*>(GetValue(_instance, ValueID_Index_Meter::Exporting)))
+					Internal::VC::ValueBool* value = static_cast<Internal::VC::ValueBool*>(GetValue(_instance, ValueID_Index_Meter::Exporting));
+					if (nullptr != value)
 					{
+						bool exporting = (rateType == 0x40 ? true : false);
 						value->OnValueRefreshed(exporting);
 						value->Release();
 					}
@@ -481,29 +527,235 @@ namespace OpenZWave
 				return false;
 			}
 
-			//-----------------------------------------------------------------------------
-			// <Meter::GetScale>
-			// Decode The Scale as its all over the place in different versions
-			//-----------------------------------------------------------------------------
 
-			int32_t Meter::GetScale(uint8_t const *_data, uint32_t const _length) {
-				uint8 scale = 0;
-				//uint8 size = (_data[2] & 0x07);
-				if (GetVersion() >= 1) {
-					scale = ((_data[2] & 0x18) >> 3);
-				}
-				if (GetVersion() >= 3) {
-					scale |= ((_data[1] & 0x80) >> 5);
-				}
-				if (GetVersion() >= 4) {
-					/* 4.55.4 - Bit 7 indicates to use Scale 2 Field */
-					if (scale == 7) {
-						scale = (_data[_length-2] + 8);
+			bool Meter::GetMeterType(uint8_t const* _data, uint8_t& _meterType)
+			{
+				_meterType = _data[1] & c_meterTypeMask;
+
+				if (_meterType >= MeterType_Electric)
+				{
+					switch (GetVersion())
+					{
+					case 1:
+					case 2:
+					case 3:
+						if (_meterType <= MeterType_Water)
+							return true;
+						break;
+
+					default:
+						if (_meterType <= MeterType_Cooling)
+							return true;
+						break;
 					}
 				}
-				return scale;
+
+				Log::Write(LogLevel_Warning, GetNodeId(), "Not a valid Meter Type (%d)", _meterType);
+				return false;
 			}
 
+
+			bool Meter::GetRateType(uint8_t const* _data, uint8_t& _rateType)
+			{
+				switch (GetVersion())
+				{
+				case 1:
+					_rateType = 0x00;
+					return true;
+					break;
+
+				case 2:
+				case 3:
+					_rateType = (_data[1] & c_rateTypeMask) >> c_rateTypeShift;
+					if (_rateType < 0x04)
+						return true;
+					break;
+
+				default:
+					_rateType = (_data[1] & c_rateTypeMask) >> c_rateTypeShift;
+					return true;
+					break;
+				}
+
+				Log::Write(LogLevel_Warning, GetNodeId(), "Not a valid Rate Type (%d)", _rateType);
+
+				return false;
+			}
+
+
+			bool Meter::GetValueElementSize(uint8_t const* _data, uint8_t& _elementSize)
+			{
+				_elementSize = _data[2] & c_sizeMask;
+
+				switch (_elementSize)
+				{
+				case 1:
+				case 2:
+				case 4:
+					return true;
+					break;
+
+				default:
+					break;
+				}
+
+				Log::Write(LogLevel_Warning, GetNodeId(), "Not a valid element size (%d)", _elementSize);
+				return false;
+
+			}
+
+
+			bool Meter::GetScale(uint8_t const* _data, const uint32_t _length, uint8_t& _scale, uint8_t& _scale1, uint8_t& _scale2)
+			{
+				_scale2 = 0;
+				if (GetVersion() >= 1)
+				{
+					_scale1 = (_data[2] & c_scaleMask) >> c_scaleShift;
+					_scale = _scale1;
+				}
+				if (GetVersion() >= 3)
+				{
+					_scale1 |= ((_data[1] & 0x80) >> 5);
+					_scale = _scale1;
+
+				}
+				if (GetVersion() >= 4)
+				{
+					/* 4.55.4 - Bit 7 indicates to use Scale 2 Field */
+					if (_scale1 == 7)
+					{
+						_scale2 = (_data[_length - 2] + 8);
+						_scale = _scale2;
+					}
+				}
+				return true;
+			}
+
+
+			bool Meter::GetPrecision(uint8_t const* _data, uint8_t& _precision)
+			{
+				_precision = (_data[2] & c_precisionMask) >> c_precisionShift;
+				return true;
+			}
+
+
+			bool Meter::ValidateLengthOfMessage(uint8_t const* _data, const uint8_t& _elementSize, const uint8_t& _scale, const uint16_t _deltaTime, const uint32 _length)
+			{
+				uint32_t expectedLength = 0;
+				if (GetVersion() >= 1)
+				{
+					expectedLength += 4 + _elementSize;
+				}
+				if (GetVersion() >= 2)
+				{
+					expectedLength += 2; //Delta Time
+					if (_deltaTime > 0)
+						expectedLength += _elementSize; //Previous meter value
+				}
+				if (GetVersion() >= 5)
+				{
+					if (_scale == 0x07)
+						expectedLength += 1; // Scale 2
+				}
+
+				if (expectedLength == _length)
+					return true;
+
+				Log::Write(LogLevel_Warning, GetNodeId(), "Length of payload is not correct. (%d), expected", _length, expectedLength);
+				return false;
+			}
+
+
+			bool Meter::GetReportValue(uint8_t const* _data, const uint8_t& _elementSize, const uint8_t& _precision, double& _value, std::string& _valueStr)
+			{
+				int32_t value = 0;
+
+				for (int i = 0; i < _elementSize; i++)
+					value = (value << 8) + _data[i];
+
+				if (_data[0] & 0x80)
+				{
+					// MSB is signed
+					if (_elementSize == 1)
+						value |= 0xffffff00;
+					else if (_elementSize == 2)
+						value |= 0xffff0000;
+				}
+
+				double divider = pow(10.00, static_cast<double>(_precision));
+				_value = static_cast<double>(value);
+				_value /= divider;
+
+				char numBuf[32] = { 0 };
+				snprintf(numBuf, 32, "%.*f", _precision, _value);
+				_valueStr = numBuf;
+
+				return true;
+			}
+
+
+			bool Meter::GetDeltaTime(uint8_t const* _data, const uint8_t& _elementSize, uint16_t& _deltaTime)
+			{
+				switch (GetVersion())
+				{
+				case 1:
+					_deltaTime = 0;
+					return true;
+					break;
+
+				default:
+					_deltaTime = _data[3 + _elementSize] << 8;
+					_deltaTime += _data[4 + _elementSize];
+					return true;
+				}
+			}
+
+
+			bool Meter::GetMeterTypeDescription(uint8_t meterType, uint8_t scale, uint16_t& index, s_MeterTypes& meter)
+			{
+				index = (((meterType - 1) * 16) + scale);
+				if (MeterTypes.count(index) == 0)
+				{
+					Log::Write(LogLevel_Warning, GetNodeId(), "MeterTypes Index is out of range/not valid - %d", index);
+					return false;
+				}
+
+				meter = MeterTypes.at(index);
+				return true;
+			}
+
+
+			//There are a lot of issues with KWh meters. In particular the Neo Cam plugs...
+			//It's ugly, and not 100% watertight, but required to have something usefull. if somebody knows a better method....
+			bool Meter::ValidateValue(const uint16_t& meterIndex, const double& value, const double& valuePrev, const uint16_t& deltaTime)
+			{
+				if (meterIndex == ValueID_Index_Meter::Electric_kWh)
+				{
+					if (value < -1000000.00) //Neo Cam Plug regulary set the MSB of the value. Unless you have a nuclear powerplant this is a invalid value
+					{
+						Log::Write(LogLevel_Warning, GetNodeId(), "KWh meter value is rediculous negative.  value:%.2f  valuePrev:%.2f  deltaTime:%d", value, valuePrev, deltaTime);
+						return false;
+					}
+
+					if (valuePrev < -1000000.00) //Neo Cam Plug regulary set the MSB of the value. Unless you have a nuclear powerplant this is a invalid value
+					{
+						Log::Write(LogLevel_Warning, GetNodeId(), "KWh meter value has rediculous negative previous.  value:%.2f  valuePrev:%.2f  deltaTime:%d", value, valuePrev, deltaTime);
+						return false;
+					}
+
+					double maxKwhChange = static_cast<double>(deltaTime) * 0.01; //equals to 36KWh
+					double kwhChange = value - valuePrev;
+					if (abs(kwhChange) > maxKwhChange)
+					{
+						Log::Write(LogLevel_Warning, GetNodeId(), "KWh meter value has changed too much.  value:%.2f  valuePrev:%.2f  deltaTime:%d", value, valuePrev, deltaTime);
+						return false;
+					}
+
+					Log::Write(LogLevel_Detail, GetNodeId(), "KWh meter value ok.  value:%.2f  valuePrev:%.2f  deltaTime:%d", value, valuePrev, deltaTime);
+				}
+
+				return true;
+			}
 
 		} // namespace CC
 	} // namespace Internal
